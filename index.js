@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -10,11 +11,14 @@ const port = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// MongoDB URI (.env থেকে ইউজার এবং পাসওয়ার্ড নিচ্ছে)
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@hobbyhub-cluster.r05fdg3.mongodb.net/?retryWrites=true&w=majority&appName=hobbyhub-cluster`;
 
 const client = new MongoClient(uri, {
-  serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true }
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  }
 });
 
 async function run() {
@@ -22,117 +26,106 @@ async function run() {
     const db = client.db("medicalCampDB");
     const campCollection = db.collection("camps");
     const registeredCollection = db.collection("registeredCamps");
-    const userCollection = db.collection("users");
+    const paymentCollection = db.collection("payments");
 
-    // --- User & Role APIs ---
+    // ==========================================================
+    // ১. পেমেন্টের জন্য ডাটা খুঁজে বের করা (ID ভিত্তিক)
+    // ==========================================================
+    // রুট পরিবর্তন: /registeredcamps/id/:id
+    app.get('/registeredcamps/id/:id', async (req, res) => {
+      try {
+        const id = req.params.id.trim();
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ message: "Invalid ID format" });
+        }
 
-    // ১. ইউজার সেভ করা (অটোমেটিক অর্গানাইজার রোল অ্যাসাইন করা)
-    app.post('/users', async (req, res) => {
-      const user = req.body;
-      const query = { email: user.email };
-      const existingUser = await userCollection.findOne(query);
+        const query = { _id: new ObjectId(id) };
+        const result = await registeredCollection.findOne(query);
 
-      if (existingUser) {
-        return res.send({ message: 'User already exists', insertedId: null });
+        if (!result) {
+          return res.status(404).send({ message: "Registration not found" });
+        }
+
+        // ফি না থাকলে মেইন ক্যাম্প থেকে নিয়ে আসা
+        if (!result.fees) {
+          const mainCamp = await campCollection.findOne({ _id: new ObjectId(result.campId) });
+          result.fees = mainCamp?.fees || mainCamp?.campFees || 0;
+        }
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Server Error", error });
       }
-
-      // স্পেশাল কন্ডিশন: এই ইমেইলটি অর্গানাইজার হবে
-      if (user.email === "td16122019@gmail.com") {
-        user.role = 'organizer';
-      } else {
-        user.role = 'participant';
-      }
-
-      const result = await userCollection.insertOne(user);
-      res.send(result);
     });
 
-    // ২. রোল চেক করা
-    app.get('/users/role/:email', async (req, res) => {
+    // Stripe Payment Intent
+    app.post('/create-payment-intent', async (req, res) => {
+      const { price } = req.body;
+      if (!price || price < 1) return res.status(400).send({ message: "Invalid Price" });
+
+      const amount = Math.round(parseFloat(price) * 100);
+      try {
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: amount,
+          currency: 'usd',
+          payment_method_types: ['card'],
+        });
+        res.send({ clientSecret: paymentIntent.client_secret });
+      } catch (error) {
+        res.status(500).send({ message: error.message });
+      }
+    });
+
+    // পেমেন্ট তথ্য সেভ করা
+    app.post('/payments', async (req, res) => {
+      const payment = req.body;
+      try {
+        const paymentResult = await paymentCollection.insertOne(payment);
+
+        const filter = { _id: new ObjectId(payment.registrationId) };
+        const updatedDoc = {
+          $set: {
+            paymentStatus: 'Paid',
+            transactionId: payment.transactionId,
+            confirmationStatus: 'Confirmed'
+          }
+        };
+        const updateResult = await registeredCollection.updateOne(filter, updatedDoc);
+
+        res.send({ paymentResult, updateResult });
+      } catch (error) {
+        res.status(500).send(error);
+      }
+    });
+
+    // ==========================================================
+    // ২. ইমেইল অনুযায়ী ডাটা গেট এবং ডিলিট
+    // ==========================================================
+    
+    // রুট পরিবর্তন: /registeredcamps/:email
+    app.get('/registeredCamps/:email', async (req, res) => {
       const email = req.params.email;
-      const user = await userCollection.findOne({ email });
-      res.send({ role: user?.role || 'participant' });
-    });
-
-    // --- Camp APIs ---
-
-    app.get('/popular-camps', async (req, res) => {
-      const result = await campCollection
-        .find()
-        .sort({ participantCount: -1 })
-        .limit(6)
-        .toArray();
+      const result = await registeredCollection.find({ participantEmail: email }).toArray();
       res.send(result);
     });
 
+    // রুট পরিবর্তন: /registeredcamps/:id
+    app.delete('/registeredCamps/:id', async (req, res) => {
+      const id = req.params.id;
+      const result = await registeredCollection.deleteOne({ _id: new ObjectId(id) });
+      res.send(result);
+    });
+
+    // ক্যাম্প গেট রুট
     app.get('/camps', async (req, res) => {
       const result = await campCollection.find().toArray();
       res.send(result);
     });
 
-    app.get('/camps/:id', async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await campCollection.findOne(query);
-      res.send(result);
-    });
-
-    app.post('/camps', async (req, res) => {
-      const campData = req.body;
-      if (!campData.participantCount) campData.participantCount = 0;
-      const result = await campCollection.insertOne(campData);
-      res.send(result);
-    });
-
-    // --- Registration & Management ---
-
-    app.get('/registered-camps/:email', async (req, res) => {
-      const email = req.params.email;
-      const query = { participantEmail: email };
-      const result = await registeredCollection.find(query).toArray();
-      res.send(result);
-    });
-
-    app.get('/registered-camps', async (req, res) => {
-      const result = await registeredCollection.find().toArray();
-      res.send(result);
-    });
-
-    app.post('/registered-camps', async (req, res) => {
-      const registrationData = req.body;
-      const result = await registeredCollection.insertOne(registrationData);
-
-      const filter = { _id: new ObjectId(registrationData.campId) };
-      const updateDoc = { $inc: { participantCount: 1 } };
-      await campCollection.updateOne(filter, updateDoc);
-
-      res.send(result);
-    });
-
-    app.patch('/registered-camps/:id', async (req, res) => {
-      const filter = { _id: new ObjectId(req.params.id) };
-      const updateDoc = { $set: { confirmationStatus: 'Confirmed' } };
-      const result = await registeredCollection.updateOne(filter, updateDoc);
-      res.send(result);
-    });
-
-    app.delete('/registered-camps/:id', async (req, res) => {
-      const id = req.params.id;
-      const registration = await registeredCollection.findOne({ _id: new ObjectId(id) });
-      
-      if (registration) {
-        const campFilter = { _id: new ObjectId(registration.campId) };
-        await campCollection.updateOne(campFilter, { $inc: { participantCount: -1 } });
-      }
-
-      const result = await registeredCollection.deleteOne({ _id: new ObjectId(id) });
-      res.send(result);
-    });
-
-    console.log("Successfully connected to MongoDB Atlas!");
+    console.log("Connected to MongoDB & Ready for Payments!");
   } finally { }
 }
 run().catch(console.dir);
 
-app.get('/', (req, res) => res.send('Medical Camp Server is Running'));
+app.get('/', (req, res) => res.send('Medical Camp Server Running'));
 app.listen(port, () => console.log(`Server is running on port: ${port}`));
