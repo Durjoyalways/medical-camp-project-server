@@ -8,21 +8,15 @@ const app = express();
 const port = process.env.PORT || 5000;
 
 // ================== MIDDLEWARE ==================
-// ================== MIDDLEWARE ==================
-const corsOptions = {
+app.use(cors({
     origin: [
-        'http://localhost:5173',
-        'https://medical-camp-project.vercel.app' 
+        'http://localhost:5173', 
+        'http://localhost:5174',
+        'https://medical-camp-project.vercel.app' // আপনার লাইভ সাইটের লিঙ্ক
     ],
-    credentials: true,
-    optionSuccessStatus: 200
-};
-
-app.use(cors(corsOptions));
+    credentials: true
+}));
 app.use(express.json());
-
-// গুরুত্বপূর্ণ: এটি Preflight (OPTIONS) রিকোয়েস্টের সমাধান
-app.options('*', cors(corsOptions));
 
 // ================== MONGODB CONNECTION ==================
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@hobbyhub-cluster.r05fdg3.mongodb.net/?retryWrites=true&w=majority&appName=hobbyhub-cluster`;
