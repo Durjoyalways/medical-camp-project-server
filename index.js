@@ -10,11 +10,11 @@ const port = process.env.PORT || 5000;
 // ================== MIDDLEWARE ==================
 app.use(cors({
     origin: [
-        'http://localhost:5173', 
-        'http://localhost:5174',
-        'https://medical-camp-project.vercel.app' // আপনার লাইভ সাইটের লিঙ্ক
+        'http://localhost:5173',
+        'https://medical-camp-project.vercel.app' 
     ],
-    credentials: true
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 }));
 app.use(express.json());
 
